@@ -1038,12 +1038,8 @@ static void copyKeychainDictionaryKey(NSString * _Nonnull group, NSString * _Non
     __block MTDatacenterAddressSet *result = nil;
     [[MTContext contextQueue] dispatchOnQueue:^
     {
-        MTDatacenterAddressSet *addressSet = _datacenterAddressSetById[@(datacenterId)];
-        if (addressSet != nil && addressSet.addressList.count != 0) {
-            result = _datacenterAddressSetById[@(datacenterId)];
-        } else {
-            result = _datacenterSeedAddressSetById[@(datacenterId)];
-        }
+        // RiseGram is a single-DC deployment. Do not use cached or externally discovered routes.
+        result = datacenterId == 2 ? _datacenterSeedAddressSetById[@(datacenterId)] : nil;
     } synchronous:true];
     
     return result;
