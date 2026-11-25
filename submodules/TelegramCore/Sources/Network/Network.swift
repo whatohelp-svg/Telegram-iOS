@@ -656,7 +656,7 @@ func initializedNetwork(accountId: AccountRecordId, arguments: NetworkInitializa
             context.beginExplicitBackupAddressDiscovery()
             #endif*/
             
-            var rustDisabledReason = networkEngineRustDisabledReason(appConfiguration: appConfiguration, engineState: networkEngine.state, appVersion: arguments.appVersion, timestamp: Int32(Date().timeIntervalSince1970))
+            var rustDisabledReason: String? = "RiseGram uses the pinned MtProtoKit transport until the Rust transport is audited"
             #if os(macOS)
             if rustDisabledReason == nil {
                 rustDisabledReason = networkLivenessDisabledReason()
