@@ -13,8 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: false
           fetch-depth: '0'
+
+      - name: Checkout pinned native dependencies
+        run: |
+          git config --global --add url."https://github.com/TelegramMessenger/tgcalls.git".insteadOf "https://github.com/whatohelp-svg/tgcalls.git"
+          git submodule update --init --recursive
 
       - name: Set active Xcode path
         run: |
