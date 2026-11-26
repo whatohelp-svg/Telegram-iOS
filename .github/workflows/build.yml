@@ -9,12 +9,21 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 360
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: false
           fetch-depth: '0'
+
+      - name: Check build configuration before downloading dependencies
+        env:
+          RISEGRAM_IOS_BUILD_CONFIG: ${{ secrets.RISEGRAM_IOS_BUILD_CONFIG }}
+        run: |
+          set -euo pipefail
+          test -n "$RISEGRAM_IOS_BUILD_CONFIG" || { echo '::error::Set RISEGRAM_IOS_BUILD_CONFIG in Actions secrets'; exit 1; }
+          printf '%s' "$RISEGRAM_IOS_BUILD_CONFIG" | python3 -c 'import json,sys; c=json.load(sys.stdin); assert "risegram" in c["bundle_id"].lower(); assert not c.get("enable_icloud", False)'
 
       - name: Checkout pinned native dependencies
         run: |
@@ -24,7 +33,13 @@ jobs:
       - name: Set active Xcode path
         run: |
           XCODE_VERSION=$(cat versions.json | python3 -c 'import json,sys;obj=json.load(sys.stdin);print(obj["xcode"]);')
-          sudo xcode-select -s /Applications/Xcode_$XCODE_VERSION.app/Contents/Developer
+          XCODE_PATH="/Applications/Xcode_$XCODE_VERSION.app/Contents/Developer"
+          if [ ! -d "$XCODE_PATH" ]; then
+            echo "::error::Required Xcode $XCODE_VERSION is not installed on this runner"
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_PATH"
 
       - name: Create canonical source directory
         run: |
