@@ -66,11 +66,18 @@ jobs:
           XCODE_VERSION=$(cat versions.json | python3 -c 'import json,sys;obj=json.load(sys.stdin);print(obj["xcode"]);')
           XCODE_PATH="/Applications/Xcode_$XCODE_VERSION.app/Contents/Developer"
           if [ ! -d "$XCODE_PATH" ]; then
-            echo "::error::Required Xcode $XCODE_VERSION is not installed on this runner"
-            ls -d /Applications/Xcode*.app || true
-            exit 1
+            if [ "$RG_IOS_MODE" = simulator ] && [ -d /Applications/Xcode_26.6.app/Contents/Developer ]; then
+              XCODE_PATH=/Applications/Xcode_26.6.app/Contents/Developer
+              echo "::warning::Testing simulator compilation with installed Xcode 26.6 instead of pinned $XCODE_VERSION; compatibility is not guaranteed."
+              echo "RG_XCODE_OVERRIDE=1" >> "$GITHUB_ENV"
+            else
+              echo "::error::Required Xcode $XCODE_VERSION is not installed on this runner"
+              ls -d /Applications/Xcode*.app || true
+              exit 1
+            fi
           fi
           sudo xcode-select -s "$XCODE_PATH"
+          xcodebuild -version
 
       - name: Create canonical source directory
         run: |
@@ -97,7 +104,11 @@ jobs:
             test -s bazel-bin/Telegram/Telegram.ipa
             cp bazel-bin/Telegram/Telegram.ipa build/artifacts/RiseGram.ipa
           else
-            python3 -u build-system/Make/Make.py \
+            XCODE_ARGS=()
+            if [ "${RG_XCODE_OVERRIDE:-0}" = 1 ]; then
+              XCODE_ARGS+=(--overrideXcodeVersion)
+            fi
+            python3 -u build-system/Make/Make.py "${XCODE_ARGS[@]}" \
               --bazelUserRoot="$BAZEL_USER_ROOT" build \
               --configurationPath="$RUNNER_TEMP/risegram-ios.json" \
               --xcodeManagedCodesigning --disableProvisioningProfiles \
