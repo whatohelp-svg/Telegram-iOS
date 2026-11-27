@@ -17,13 +17,44 @@ jobs:
           submodules: false
           fetch-depth: '0'
 
-      - name: Check build configuration before downloading dependencies
+      - name: Select signed device or unsigned simulator build
         env:
           RISEGRAM_IOS_BUILD_CONFIG: ${{ secrets.RISEGRAM_IOS_BUILD_CONFIG }}
+          RISEGRAM_IOS_SIGNING_ZIP_B64: ${{ secrets.RISEGRAM_IOS_SIGNING_ZIP_B64 }}
         run: |
           set -euo pipefail
-          test -n "$RISEGRAM_IOS_BUILD_CONFIG" || { echo '::error::Set RISEGRAM_IOS_BUILD_CONFIG in Actions secrets'; exit 1; }
-          printf '%s' "$RISEGRAM_IOS_BUILD_CONFIG" | python3 -c 'import json,sys; c=json.load(sys.stdin); assert "risegram" in c["bundle_id"].lower(); assert not c.get("enable_icloud", False)'
+          umask 077
+          if [ -n "$RISEGRAM_IOS_BUILD_CONFIG" ] && [ -n "$RISEGRAM_IOS_SIGNING_ZIP_B64" ]; then
+            echo "RG_IOS_MODE=device" >> "$GITHUB_ENV"
+            printf '%s' "$RISEGRAM_IOS_BUILD_CONFIG" > "$RUNNER_TEMP/risegram-ios.json"
+            python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); assert "risegram" in c["bundle_id"].lower(); assert not c.get("enable_icloud", False)' "$RUNNER_TEMP/risegram-ios.json"
+            python3 - <<'PY'
+          import base64, io, os, pathlib, zipfile
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "risegram-signing"
+          with zipfile.ZipFile(io.BytesIO(base64.b64decode(os.environ["RISEGRAM_IOS_SIGNING_ZIP_B64"], validate=True))) as archive:
+              for info in archive.infolist():
+                  p = pathlib.PurePosixPath(info.filename)
+                  if p.is_absolute() or ".." in p.parts:
+                      raise ValueError("Unsafe signing archive path")
+              archive.extractall(root)
+          assert (root / "profiles").is_dir() and (root / "certs").is_dir()
+          PY
+          else
+            echo "RG_IOS_MODE=simulator" >> "$GITHUB_ENV"
+            echo "::notice::Apple signing not configured; compiling an unsigned simulator build, not a device IPA."
+            python3 - <<'PY'
+          import json, os, pathlib
+          config = {
+              "bundle_id": "org.risegram.experimental", "api_id": "100000",
+              "api_hash": "00000000000000000000000000000000",
+              "team_id": "0000000000", "is_internal_build": "true",
+              "is_appstore_build": "false", "appstore_id": "0",
+              "app_specific_url_scheme": "risegram", "premium_iap_product_id": "",
+              "enable_siri": False, "enable_icloud": False
+          }
+          (pathlib.Path(os.environ["RUNNER_TEMP"]) / "risegram-ios.json").write_text(json.dumps(config))
+          PY
+          fi
 
       - name: Checkout pinned native dependencies
         run: |
@@ -48,59 +79,43 @@ jobs:
           cp -R $GITHUB_WORKSPACE /Users/Shared/
           mv /Users/Shared/$(basename $GITHUB_WORKSPACE) /Users/Shared/telegram-ios
 
-      - name: Build the App
-        env:
-          RISEGRAM_IOS_BUILD_CONFIG: ${{ secrets.RISEGRAM_IOS_BUILD_CONFIG }}
+      - name: Compile and package RiseGram
         run: |
           set -euo pipefail
-          test -n "$RISEGRAM_IOS_BUILD_CONFIG" || { echo 'Configure RISEGRAM_IOS_BUILD_CONFIG first'; exit 1; }
-
-          # source code paths are included in the final binary, so we need to make them stable across builds
           SOURCE_DIR=/Users/Shared/telegram-ios
-
-          # use canonical bazel root
-          BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
-
-          cd $SOURCE_DIR
-          printf '%s' "$RISEGRAM_IOS_BUILD_CONFIG" > "$RUNNER_TEMP/risegram-ios.json"
-          python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); assert "risegram" in c["bundle_id"].lower(); assert not c.get("enable_icloud", False)' "$RUNNER_TEMP/risegram-ios.json"
-
-          BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
-
-          export APP_VERSION=$(cat versions.json | python3 -c 'import json,sys;obj=json.load(sys.stdin);print(obj["app"]);')
-          export COMMIT_COUNT=$(git rev-list --count HEAD)
-          export COMMIT_COUNT="$(($COMMIT_COUNT+$BUILD_NUMBER_OFFSET))"
-          export BUILD_NUMBER="$COMMIT_COUNT"
-          echo "BUILD_NUMBER=$(echo $BUILD_NUMBER)" >> $GITHUB_ENV
-          echo "APP_VERSION=$(echo $APP_VERSION)" >> $GITHUB_ENV
-
-          python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
-          python3 -u build-system/Make/Make.py \
-            --bazelUserRoot="$BAZEL_USER_ROOT" \
-            build \
-            --configurationPath="$RUNNER_TEMP/risegram-ios.json" \
-            --codesigningInformationPath=build-system/fake-codesigning \
-            --configuration=release_arm64 \
-            --buildNumber="$BUILD_NUMBER"
-
-          # collect ipa
-          OUTPUT_PATH="build/artifacts"
-          rm -rf "$OUTPUT_PATH"
-          mkdir -p "$OUTPUT_PATH"
-          for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa; do
-            cp "$f" $OUTPUT_PATH/
-          done
-
-          # collect dsym
-          mkdir -p build/DSYMs
-          for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/*.dSYM; do
-            cp -R "$f" build/DSYMs/
-          done
-          zip -r "./$OUTPUT_PATH/Telegram.DSYMs.zip" build/DSYMs 1>/dev/null
+          BAZEL_USER_ROOT=/private/var/tmp/_bazel_containerhost
+          cd "$SOURCE_DIR"
+          BUILD_NUMBER=$(($(git rev-list --count HEAD)+$(cat build_number_offset)))
+          mkdir -p build/artifacts
+          if [ "$RG_IOS_MODE" = device ]; then
+            python3 build-system/Make/ImportCertificates.py --path "$RUNNER_TEMP/risegram-signing/certs"
+            python3 -u build-system/Make/Make.py \
+              --bazelUserRoot="$BAZEL_USER_ROOT" build \
+              --configurationPath="$RUNNER_TEMP/risegram-ios.json" \
+              --codesigningInformationPath="$RUNNER_TEMP/risegram-signing" \
+              --configuration=release_arm64 --buildNumber="$BUILD_NUMBER"
+            test -s bazel-bin/Telegram/Telegram.ipa
+            cp bazel-bin/Telegram/Telegram.ipa build/artifacts/RiseGram.ipa
+          else
+            python3 -u build-system/Make/Make.py \
+              --bazelUserRoot="$BAZEL_USER_ROOT" build \
+              --configurationPath="$RUNNER_TEMP/risegram-ios.json" \
+              --xcodeManagedCodesigning --disableProvisioningProfiles \
+              --configuration=release_sim_arm64 --buildNumber="$BUILD_NUMBER"
+            test -s bazel-bin/Telegram/Telegram.ipa
+            unzip -q bazel-bin/Telegram/Telegram.ipa -d "$RUNNER_TEMP/risegram-simulator"
+            APP=$(find "$RUNNER_TEMP/risegram-simulator/Payload" -maxdepth 1 -name '*.app' -print -quit)
+            test -n "$APP"
+            ditto -c -k --sequesterRsrc --keepParent "$APP" build/artifacts/RiseGram-iOS-Simulator.zip
+          fi
+      - name: Remove temporary signing data
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/risegram-signing" "$RUNNER_TEMP/risegram-ios.json"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: RiseGram-iOS-experimental-unsigned
+          name: RiseGram-iOS-${{ env.RG_IOS_MODE }}
           path: /Users/Shared/telegram-ios/build/artifacts/
           if-no-files-found: error
           retention-days: 7
